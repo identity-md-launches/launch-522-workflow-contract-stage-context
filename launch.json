@@ -1,0 +1,40 @@
+{
+  "kind": "evm_project",
+  "token": {
+    "contract": "LaunchToken",
+    "name": "Pepe Values Pepe",
+    "symbol": "PVP",
+    "decimals": 18
+  },
+  "contracts": [
+    {
+      "contract": "WorkerSubsidy",
+      "constructorArgs": ["$owner"]
+    },
+    {
+      "contract": "KingOfThePad",
+      "constructorArgs": ["$contract:WorkerSubsidy"]
+    },
+    {
+      "contract": "PvPadHook",
+      "constructorArgs": ["0xe03a1074c86cfedd5c142c4f04f1a1536e203543"]
+    },
+    {
+      "contract": "PvPadFactory",
+      "constructorArgs": [
+        "0xe03a1074c86cfedd5c142c4f04f1a1536e203543",
+        "$contract:WorkerSubsidy",
+        "$contract:KingOfThePad",
+        "$contract:PvPadHook",
+        "$owner"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "PvPad permissionless multi-token launchpad, intended for Ethereum Sepolia. Both PoolManager arguments use the Sepolia address listed by Uniswap at https://developers.uniswap.org/docs/protocols/v4/deployments#sepolia-11155111. Services must verify the target chain and deployed PoolManager compatibility. LaunchToken has no constructor arguments and is distinct from the factory-created genesis PvPadToken; both use Pepe Values Pepe / PVP. The manifest pool is the protocol LaunchToken/native ETH pool with no hook. Application pools use fee 0, tick spacing 60 and the shared PvPadHook, which charges the implemented 1% fee split equally between king and creator. PvPadFactory constructs FeeEscrow and genesis launch 0 (PvPadToken plus BondingCurve) without a create fee; later launches create their own token and curve. These child contracts are not separate manifest entries. Graduation at 4.2 ETH locks application liquidity in PvPadFactory. No post-deployment initialization calls are required. Policy-derived $owner is both WorkerSubsidy.initialUpdater and PvPadFactory.genesisCreator, including the genesis creator fee entitlement. Independent review must confirm policy authorization for both roles. The updater is trusted to publish off-chain worker Merkle allocations; the contracts do not verify the worker API or an oracle attestation. PvPadHook construction requires (uint160(hookAddress) & 0x3fff) == 0x00cc and enables no beforeInitialize callback. Deployment services must demonstrate compatible CREATE2 salt/address derivation using the actual deployer, creation code and PoolManager argument; an incompatible salt scheme is a deployment blocker and cannot be corrected by initialization calls. Genesis construction also requires a compatible live PoolManager and rejects a preinitialized genesis pool at a conflicting price. Policy, signed artifact linkage, independent review, admission, deployment and frontend publication belong to their respective services; these notes do not grant authority or claim those outcomes."
+}
