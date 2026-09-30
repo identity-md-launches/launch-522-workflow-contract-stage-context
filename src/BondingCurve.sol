@@ -93,7 +93,7 @@ contract BondingCurve is ReentrancyGuard {
     }
 
     function quoteSell(uint256 tokensIn) public view returns (uint256 ethOut, uint256 fee) {
-        if (graduated || tokensIn == 0) return (0, 0);
+        if (graduated || readyToGraduate() || tokensIn == 0) return (0, 0);
         uint256 grossEth = _ethOutForTokens(tokensIn);
         if (grossEth > ethReserve || tokensIn > PvPadConstants.TOKEN_SUPPLY - tokenReserve) return (0, 0);
         fee = _fee(grossEth);
@@ -151,6 +151,7 @@ contract BondingCurve is ReentrancyGuard {
         returns (uint256 ethOut)
     {
         _checkTrade(recipient, deadline);
+        if (readyToGraduate()) revert NotReady();
         if (amount == 0) revert ZeroAmount();
         if (amount > PvPadConstants.TOKEN_SUPPLY - tokenReserve) revert InsufficientLiquidity();
         uint256 grossEth = _ethOutForTokens(amount);

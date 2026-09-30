@@ -14,6 +14,7 @@ Machine-readable ABI arrays in `docs/abi/<Contract>.json` are exported from Soli
 | `sell(uint256,address,uint256,uint256)` | Token amount, ETH recipient, minimum ETH output, deadline; approve curve for exact token input first |
 | `readyToGraduate`, `getReserves` | Progress from accounted net ETH; donations and pending fees do not count |
 | `PvPadFactory.graduate(id)` | Permissionless, once threshold reached; no ETH supplied; permanently locks liquidity |
+| `lockedLiquidity(id)`, `lockedTickLower(id)`, `lockedTickUpper(id)`, `LiquidityRangeLocked` | Actual factory-owned v4 position; salt `bytes32(id)`; saturated boundaries may move inward from full range |
 | `PvPadHook.getHookPermissions`, `bindings` | Check flag layout and per-pool factory/escrow/creator binding |
 | `KingOfThePad.claimKing(address)` | Beneficiary; payable value strictly exceeds current claimPrice; old king is not refunded |
 | `FeeEscrow.pending(address(0),account)`, `withdraw(address(0),to)` | Read native credit; only credited caller may withdraw, to a chosen nonzero address; returns 0 if recipient rejects |
@@ -27,6 +28,8 @@ Machine-readable ABI arrays in `docs/abi/<Contract>.json` are exported from Soli
 | `proposeUpdater`, `acceptUpdater` | Current updater nominates a nonzero replacement; nominee must accept |
 
 The unprotected `buy(address)` and `sell(uint256,address)` convenience overloads retain upstream compatibility. Production UI calls should use minimum-output/deadline overloads. Deadlines are inclusive.
+
+At exactly 4.2 ETH of accounted reserves, both curve trade directions revert `NotReady` until graduation (then `Graduated`). Both buy and sell quotes are zero. Submit permissionless `graduate(id)`; a failed graduation leaves the threshold state intact for retry. Index the selected LP ticks rather than assuming the extremes. `LiquidityRangeUnavailable` fails graduation atomically if no acceptable range containing the canonical price remains.
 
 Escrow `authorizeRecorder` is callable only by the immutable factory; the factory exposes no public forwarding setter. Recording methods, including `recordTradeFeeNativeFor` and `recordTradeFeeNativeShares`, are internal integration surfaces for authorized curves/hook, not user deposits. Explicit-share recording preserves the sum of individual rounded halves during deferred retries.
 

@@ -14,6 +14,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {Pool} from "@uniswap/v4-core/src/libraries/Pool.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 import {PvPadToken} from "./PvPadToken.sol";
@@ -24,7 +25,7 @@ import {WorkerSubsidy} from "./WorkerSubsidy.sol";
 import {PvPadHook} from "./hooks/PvPadHook.sol";
 import {PvPadConstants} from "./libraries/PvPadConstants.sol";
 
-/// @notice Permissionless pad: creates curves and permanently holds their graduated full-range positions.
+/// @notice Permissionless pad: creates curves and permanently holds their graduated liquidity positions.
 /// @dev The factory owns v4 positions. There is no call path that decreases liquidity or collects it.
 contract PvPadFactory is ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
@@ -42,6 +43,7 @@ contract PvPadFactory is ReentrancyGuard {
     error UnexpectedPoolPrice();
     error InvalidCallback();
     error ZeroLiquidity();
+    error LiquidityRangeUnavailable();
 
     event LaunchCreated(
         uint256 indexed launchId, address indexed creator, address token, address curve, string name, string symbol
@@ -49,6 +51,7 @@ contract PvPadFactory is ReentrancyGuard {
     event Graduated(uint256 indexed launchId, PoolId poolId, uint160 sqrtPriceX96);
     event LaunchMetadata(uint256 indexed launchId, string metadataURI);
     event LiquidityLocked(uint256 indexed launchId, uint128 liquidity, uint256 ethDust, uint256 tokenDust);
+    event LiquidityRangeLocked(uint256 indexed launchId, int24 tickLower, int24 tickUpper);
 
     struct Launch {
         address creator;
@@ -74,6 +77,8 @@ contract PvPadFactory is ReentrancyGuard {
     mapping(PoolId => address) public poolCreator;
     mapping(address => bool) public isBondingCurve;
     mapping(uint256 => uint128) public lockedLiquidity;
+    mapping(uint256 => int24) public lockedTickLower;
+    mapping(uint256 => int24) public lockedTickUpper;
     bytes32 private expectedCallback;
 
     constructor(
@@ -230,17 +235,11 @@ contract PvPadFactory is ReentrancyGuard {
         expectedCallback = bytes32(0);
         (PoolKey memory key, uint256 ethAmount, uint256 tokenAmount, uint256 launchId) =
             abi.decode(rawData, (PoolKey, uint256, uint256, uint256));
-        int24 tickLower = TickMath.minUsableTick(PvPadConstants.POOL_TICK_SPACING);
-        int24 tickUpper = TickMath.maxUsableTick(PvPadConstants.POOL_TICK_SPACING);
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            canonicalSqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            ethAmount,
-            tokenAmount
-        );
+        (int24 tickLower, int24 tickUpper, uint128 liquidity) = _availableRange(key.toId(), ethAmount, tokenAmount);
         if (liquidity == 0) revert ZeroLiquidity();
         lockedLiquidity[launchId] = liquidity;
+        lockedTickLower[launchId] = tickLower;
+        lockedTickUpper[launchId] = tickUpper;
         IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -253,8 +252,41 @@ contract PvPadFactory is ReentrancyGuard {
         key.currency0.settle(poolManager, address(this), usedEth, false);
         key.currency1.settle(poolManager, address(this), usedToken, false);
         // Integer rounding dust remains locked at this contract, with no recovery or withdrawal path.
+        emit LiquidityRangeLocked(launchId, tickLower, tickUpper);
         emit LiquidityLocked(launchId, liquidity, ethAmount - usedEth, tokenAmount - usedToken);
         return "";
+    }
+
+    /// @dev Permissionless v4 deposits can exhaust either extreme tick's liquidity cap for dust.
+    /// Move only occupied boundaries inward, retaining the canonical price inside the range.
+    /// Recompute liquidity after each move: a narrower range can require more tick capacity.
+    function _availableRange(PoolId poolId, uint256 ethAmount, uint256 tokenAmount)
+        private
+        view
+        returns (int24 tickLower, int24 tickUpper, uint128 liquidity)
+    {
+        int24 spacing = PvPadConstants.POOL_TICK_SPACING;
+        tickLower = TickMath.minUsableTick(spacing);
+        tickUpper = TickMath.maxUsableTick(spacing);
+        uint128 maxPerTick = Pool.tickSpacingToMaxLiquidityPerTick(spacing);
+        while (true) {
+            uint160 lowerPrice = TickMath.getSqrtPriceAtTick(tickLower);
+            uint160 upperPrice = TickMath.getSqrtPriceAtTick(tickUpper);
+            if (lowerPrice >= canonicalSqrtPriceX96 || upperPrice <= canonicalSqrtPriceX96) {
+                revert LiquidityRangeUnavailable();
+            }
+            liquidity = LiquidityAmounts.getLiquidityForAmounts(
+                canonicalSqrtPriceX96, lowerPrice, upperPrice, ethAmount, tokenAmount
+            );
+            if (liquidity > maxPerTick) revert LiquidityRangeUnavailable();
+            (uint128 lowerGross,) = StateLibrary.getTickLiquidity(poolManager, poolId, tickLower);
+            (uint128 upperGross,) = StateLibrary.getTickLiquidity(poolManager, poolId, tickUpper);
+            bool lowerFull = lowerGross > maxPerTick - liquidity;
+            bool upperFull = upperGross > maxPerTick - liquidity;
+            if (!lowerFull && !upperFull) return (tickLower, tickUpper, liquidity);
+            if (lowerFull) tickLower += spacing;
+            if (upperFull) tickUpper -= spacing;
+        }
     }
 
     receive() external payable {}

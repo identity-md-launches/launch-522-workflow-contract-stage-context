@@ -250,6 +250,40 @@ contract PvPadIntegrationTest is Test {
         assertTrue(curve.graduated());
     }
 
+    function test_thresholdDustSellCannotInvalidatePermissionlessGraduation() public {
+        (BondingCurve curve, IERC20 token) = _curve(0);
+        address holder = address(0xBAD);
+        vm.deal(holder, 0.01 ether);
+        vm.prank(holder);
+        curve.buy{value: 0.01 ether}(holder);
+        vm.prank(trader);
+        curve.buy{value: 5 ether}(trader, 1, block.timestamp);
+        uint256 sliver = 5_892_857_143; // Before this fix, a zero-fee 99 wei sell.
+        uint256 balanceBefore = token.balanceOf(holder);
+        uint256 reserveBefore = curve.tokenReserve();
+        uint256 feesBefore = escrow.totalSkimmedEth();
+        (uint256 quote, uint256 fee) = curve.quoteSell(sliver);
+        assertEq(quote, 0);
+        assertEq(fee, 0);
+        vm.startPrank(holder);
+        token.approve(address(curve), sliver);
+        vm.expectRevert(BondingCurve.NotReady.selector);
+        curve.sell(sliver, holder);
+        vm.expectRevert(BondingCurve.NotReady.selector);
+        curve.sell(sliver, holder, 0, block.timestamp);
+        vm.stopPrank();
+        assertEq(curve.ethReserve(), 4.2 ether);
+        assertEq(curve.tokenReserve(), reserveBefore);
+        assertEq(token.balanceOf(holder), balanceBefore);
+        assertEq(token.allowance(holder, address(curve)), sliver);
+        assertEq(escrow.totalSkimmedEth(), feesBefore);
+        assertTrue(curve.readyToGraduate());
+        vm.prank(address(0x1234));
+        factory.graduate(0);
+        assertTrue(curve.graduated());
+        assertTrue(factory.isRegisteredPool(_key(0).toId()));
+    }
+
     function test_unspecifiedETHPartialFillChargesOnlyExecution() public {
         _graduate(0);
         PoolKey memory key = _key(0);

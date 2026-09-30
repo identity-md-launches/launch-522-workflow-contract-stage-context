@@ -413,6 +413,44 @@
   },
   {
     "type": "function",
+    "name": "lockedTickLower",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "int24",
+        "internalType": "int24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lockedTickUpper",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "int24",
+        "internalType": "int24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "poolCreator",
     "inputs": [
       {
@@ -613,6 +651,31 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "LiquidityRangeLocked",
+    "inputs": [
+      {
+        "name": "launchId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "tickLower",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "tickUpper",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AddressEmptyCode",
     "inputs": [
@@ -662,6 +725,11 @@
   {
     "type": "error",
     "name": "LaunchFeeRequired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LiquidityRangeUnavailable",
     "inputs": []
   },
   {
