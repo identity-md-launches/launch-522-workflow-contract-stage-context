@@ -72,6 +72,8 @@ contract CurveSequenceHandler is Test {
     uint256 public lastProduct = (1e27 + 1e27 / 8) * 2.1 ether;
     uint256 public buys;
     uint256 public sells;
+    bool public fundingComplete;
+    uint256 public tokensAtCapacity;
     bool public terminal;
     mapping(address => uint256) public expectedPending;
     mapping(address => uint256) public expectedDeferred;
@@ -128,6 +130,11 @@ contract CurveSequenceHandler is Test {
         grossBuys += accepted;
         ++buys;
         _captureFee(fee);
+        // Derive the one-way funding transition from cash flows, independently of readiness.
+        if (grossBuys == netSells + fees + 4.2 ether) {
+            fundingComplete = true;
+            tokensAtCapacity = curve.tokenReserve();
+        }
         _checkProduct();
     }
 
@@ -141,6 +148,16 @@ contract CurveSequenceHandler is Test {
             return;
         }
         uint256 balance = token.balanceOf(seller);
+        if (fundingComplete) {
+            uint256 amount = balance == 0 ? 1 : bound(amountSeed, 1, balance);
+            (uint256 quoted, uint256 quotedFee) = curve.quoteSell(amount);
+            assertEq(quoted, 0);
+            assertEq(quotedFee, 0);
+            vm.prank(seller);
+            vm.expectRevert(BondingCurve.NotReady.selector);
+            curve.sell(amount, recipient);
+            return;
+        }
         if (balance == 0) return;
         uint256 amount = bound(amountSeed, 1, balance);
         (uint256 quoted, uint256 quotedFee) = curve.quoteSell(amount);
@@ -243,7 +260,7 @@ contract CurveSequenceHandler is Test {
             return;
         }
         if (!curve.readyToGraduate()) {
-            if (seed % 16 != 0) {
+            if (seed % 16 > 1) {
                 vm.expectRevert(BondingCurve.NotReady.selector);
                 fixture.sweep();
                 return;
@@ -252,7 +269,7 @@ contract CurveSequenceHandler is Test {
             // Each top-up uses the same checked buy path, including the cap refund and fee model.
             while (!curve.readyToGraduate()) buy(seed, seed, 0.9 ether);
         }
-        // Leave a chance to sell off the exact threshold before sweeping.
+        // Keep some fully funded curves unswept so subsequent calls exercise the trading lock.
         if (seed % 4 != 0) return;
         uint256 tokens = curve.tokenReserve();
         (uint256 nativeSwept, uint256 tokensSwept) = fixture.sweep();
@@ -325,7 +342,12 @@ contract CurveInvariantTest is Test {
         assertEq(address(curve).balance, curve.ethReserve() + curve.totalDeferredFees() + handler.nativeDonations());
         assertEq(token.balanceOf(address(curve)), curve.tokenReserve() + handler.tokenDonations());
         assertLe(curve.ethReserve(), 4.2 ether);
-        assertEq(curve.readyToGraduate(), !handler.terminal() && curve.ethReserve() == 4.2 ether);
+        assertEq(curve.readyToGraduate(), handler.fundingComplete() && !handler.terminal());
+        if (handler.fundingComplete() && !handler.terminal()) {
+            assertEq(curve.ethReserve(), 4.2 ether, "a funded curve cannot lose graduation readiness");
+            assertEq(curve.tokenReserve(), handler.tokensAtCapacity());
+            assertEq(curve.maxBuyInput(), 0);
+        }
     }
 
     /// Every captured fee has exactly one destination, including individual odd-wei rounding.
@@ -417,6 +439,62 @@ contract CurveInvariantTest is Test {
         invariant_curveReservesEqualIndependentCashFlows();
         invariant_everyFeeIsBackedAndBelongsToItsCapturedBeneficiary();
         invariant_supplyAndNativeAssetsAreConserved();
+        invariant_graduationIsTerminalAndOnlySweepsTradingReserves();
+    }
+
+    function test_handlerExercisesFundedTradingLockBeforeSweep() public {
+        handler.setDelivery(false);
+        handler.graduate(1); // Fill the curve, deliberately defer the reserve sweep.
+        assertTrue(handler.fundingComplete());
+        assertFalse(handler.terminal());
+        assertTrue(curve.readyToGraduate());
+        assertGt(curve.totalDeferredFees(), 0);
+        handler.sell(1, 2, 1);
+        handler.sell(1, 2, 5_892_857_143); // Previously sufficient to remove 99 wei of reserves.
+        handler.sell(1, 2, token.balanceOf(handler.actors(1)));
+        handler.buy(1, 2, 1);
+        handler.donate(1, 17, 19);
+        handler.claimCrown(0, 2);
+        handler.flush(4); // Failed delivery must preserve readiness and the fee liability.
+        handler.setDelivery(true);
+        handler.flush(4);
+        invariant_curveReservesEqualIndependentCashFlows();
+        invariant_everyFeeIsBackedAndBelongsToItsCapturedBeneficiary();
+        invariant_supplyAndNativeAssetsAreConserved();
+        handler.graduate(0);
+        assertTrue(handler.terminal());
+        invariant_curveReservesEqualIndependentCashFlows();
+        invariant_everyFeeIsBackedAndBelongsToItsCapturedBeneficiary();
+        invariant_supplyAndNativeAssetsAreConserved();
+        invariant_graduationIsTerminalAndOnlySweepsTradingReserves();
+    }
+
+    /// forge-config: default.fuzz.runs = 256
+    function testFuzz_fundedCurveRejectsBothSellOverloadsAtomically(uint256 amountSeed, bool protectedOverload) public {
+        handler.graduate(1);
+        address seller = handler.actors(1);
+        address recipient = handler.actors(2);
+        uint256 tokensBefore = token.balanceOf(seller);
+        uint256 amount = bound(amountSeed, 1, tokensBefore);
+        uint256 recipientBefore = recipient.balance;
+        vm.prank(seller);
+        token.approve(address(curve), amount);
+        uint256 allowanceBefore = token.allowance(seller, address(curve));
+        (uint256 quoted, uint256 fee) = curve.quoteSell(amount);
+        assertEq(quoted, 0);
+        assertEq(fee, 0);
+        vm.prank(seller);
+        vm.expectRevert(BondingCurve.NotReady.selector);
+        if (protectedOverload) curve.sell(amount, recipient, 0, block.timestamp);
+        else curve.sell(amount, recipient);
+        assertEq(token.balanceOf(seller), tokensBefore);
+        assertEq(token.allowance(seller, address(curve)), allowanceBefore);
+        assertEq(recipient.balance, recipientBefore);
+        invariant_curveReservesEqualIndependentCashFlows();
+        invariant_everyFeeIsBackedAndBelongsToItsCapturedBeneficiary();
+        invariant_supplyAndNativeAssetsAreConserved();
+        handler.graduate(0);
+        assertTrue(handler.terminal());
         invariant_graduationIsTerminalAndOnlySweepsTradingReserves();
     }
 

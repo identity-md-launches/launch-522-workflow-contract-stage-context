@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Pool} from "@uniswap/v4-core/src/libraries/Pool.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
@@ -44,6 +45,8 @@ contract HookInvariantHandler is Test {
     address[3] public actors;
     address[2] public creators;
     uint128[2] public initialLiquidity;
+    int24[2] public initialTickLower;
+    int24[2] public initialTickUpper;
     mapping(address => uint256) public expectedPending;
     mapping(uint256 => mapping(address => uint256)) public expectedDeferred;
     mapping(uint256 => mapping(address => uint256)) public expectedDeferredKing;
@@ -72,6 +75,8 @@ contract HookInvariantHandler is Test {
         for (uint256 i; i < 2; ++i) {
             expectedPending[creators_[i]] = seedFee - seedFee / 2;
             initialLiquidity[i] = factory_.lockedLiquidity(i);
+            initialTickLower[i] = factory_.lockedTickLower(i);
+            initialTickUpper[i] = factory_.lockedTickUpper(i);
             require(initialLiquidity[i] != 0, "fixture needs locked pools");
         }
         require(escrow.totalSkimmedEth() == captured, "incorrect seed fee");
@@ -198,8 +203,8 @@ contract HookInvariantHandler is Test {
         liquidityRouter.modifyLiquidity(
             key,
             IPoolManager.ModifyLiquidityParams(
-                TickMath.minUsableTick(60),
-                TickMath.maxUsableTick(60),
+                initialTickLower[launch],
+                initialTickUpper[launch],
                 -int256(uint256(initialLiquidity[launch])),
                 bytes32(launch)
             ),
@@ -254,10 +259,12 @@ contract HookInvariantHandler is Test {
             assertEq(curve.tokenReserve(), 0);
             assertEq(address(curve).balance, 0);
             (uint128 liquidity,,) = StateLibrary.getPositionInfo(
-                manager, id, address(factory), TickMath.minUsableTick(60), TickMath.maxUsableTick(60), bytes32(i)
+                manager, id, address(factory), initialTickLower[i], initialTickUpper[i], bytes32(i)
             );
             assertEq(liquidity, initialLiquidity[i], "graduation position cannot be withdrawn");
             assertEq(factory.lockedLiquidity(i), liquidity);
+            assertEq(factory.lockedTickLower(i), initialTickLower[i]);
+            assertEq(factory.lockedTickUpper(i), initialTickUpper[i]);
             assertEq(StateLibrary.getLiquidity(manager, id), liquidity);
             uint256 accounted =
                 token.balanceOf(address(manager)) + token.balanceOf(address(factory)) + token.balanceOf(curveAddress);
@@ -322,7 +329,12 @@ contract HookInvariantTest is Test {
         IERC20 token = IERC20(tokenAddress);
         vm.prank(actors[0]);
         BondingCurve(payable(curveAddress)).buy{value: 5 ether}(actors[0], 1, block.timestamp);
+        // Keep launch 0 full-range; launch 1 must graduate past occupied ticks on both sides.
+        if (launch == 1) _saturateBoundaryTicks(factory, actors[0], token, launch);
         factory.graduate(launch);
+        int24 shift = launch == 1 ? int24(120) : int24(0);
+        assertEq(factory.lockedTickLower(launch), TickMath.minUsableTick(60) + shift);
+        assertEq(factory.lockedTickUpper(launch), TickMath.maxUsableTick(60) - shift);
         uint256 share = token.balanceOf(actors[0]) / 3;
         for (uint256 j = 1; j < 3; ++j) {
             vm.prank(actors[0]);
@@ -332,6 +344,23 @@ contract HookInvariantTest is Test {
             vm.prank(actors[j]);
             token.approve(address(router), type(uint256).max);
         }
+    }
+
+    function _saturateBoundaryTicks(PvPadFactory factory, address actor, IERC20 token, uint256 launch) private {
+        PoolModifyLiquidityTest attacker = new PoolModifyLiquidityTest(factory.poolManager());
+        PoolKey memory key = factory.getPoolKey(launch);
+        int24 lower = TickMath.minUsableTick(60);
+        int24 upper = TickMath.maxUsableTick(60);
+        int256 maximum = int256(uint256(Pool.tickSpacingToMaxLiquidityPerTick(60)));
+        vm.startPrank(actor);
+        token.approve(address(attacker), type(uint256).max);
+        attacker.modifyLiquidity{value: 0.001 ether}(
+            key, IPoolManager.ModifyLiquidityParams(lower, lower + 60, maximum, bytes32(0)), ""
+        );
+        attacker.modifyLiquidity{value: 0.001 ether}(
+            key, IPoolManager.ModifyLiquidityParams(upper - 60, upper, maximum, bytes32(0)), ""
+        );
+        vm.stopPrank();
     }
 
     function invariant_realPoolFeeCustodyAndBeneficiaryAccounting() public view {
@@ -375,5 +404,17 @@ contract HookInvariantTest is Test {
         handler.attackLockedPosition(0, 0);
         handler.attackLockedPosition(1, 1);
         handler.assertLockedLiquidityAndSupply();
+    }
+
+    function test_shiftedGraduationRangeRemainsLockedAcrossAllSwapModes() public {
+        assertGt(handler.initialTickLower(1), TickMath.minUsableTick(60));
+        assertLt(handler.initialTickUpper(1), TickMath.maxUsableTick(60));
+        for (uint8 mode; mode < 4; ++mode) {
+            handler.swap(1, mode % 3, mode, mode == 0 || mode == 3 ? uint128(0.001 ether) : uint128(1_000 ether));
+            handler.attackLockedPosition(1, mode % 3);
+            handler.assertFeeConservation();
+            handler.assertLockedLiquidityAndSupply();
+        }
+        assertEq(handler.swaps(), 4);
     }
 }
