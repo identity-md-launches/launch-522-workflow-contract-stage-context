@@ -16,6 +16,19 @@
   },
   {
     "type": "function",
+    "name": "REQUIRED_FLAGS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint160",
+        "internalType": "uint160"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "afterAddLiquidity",
     "inputs": [
       {
@@ -430,12 +443,12 @@
     "name": "beforeAddLiquidity",
     "inputs": [
       {
-        "name": "",
+        "name": "sender",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "",
+        "name": "key",
         "type": "tuple",
         "internalType": "struct PoolKey",
         "components": [
@@ -506,7 +519,7 @@
         "internalType": "bytes4"
       }
     ],
-    "stateMutability": "pure"
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1178,7 +1191,23 @@
   },
   {
     "type": "error",
+    "name": "HookAddressNotValid",
+    "inputs": [
+      {
+        "name": "hooks",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidPool",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LiquidityClosed",
     "inputs": []
   },
   {

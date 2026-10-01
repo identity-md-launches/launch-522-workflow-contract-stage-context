@@ -5,6 +5,9 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Pool} from "@uniswap/v4-core/src/libraries/Pool.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -297,7 +300,7 @@ contract HookInvariantTest is Test {
         PoolSwapTest router = new PoolSwapTest(manager);
         WorkerSubsidy workers = new WorkerSubsidy(address(this));
         KingOfThePad king = new KingOfThePad(workers);
-        (, bytes32 salt) = HookMiner.find(address(this), 0x00cc, type(PvPadHook).creationCode, abi.encode(manager));
+        (, bytes32 salt) = HookMiner.findPvPadHook(address(this), address(manager));
         PvPadHook hook = new PvPadHook{salt: salt}(manager);
         PvPadFactory factory = new PvPadFactory(manager, workers, king, hook, creators[0]);
         vm.deal(address(this), 100 ether);
@@ -329,12 +332,13 @@ contract HookInvariantTest is Test {
         IERC20 token = IERC20(tokenAddress);
         vm.prank(actors[0]);
         BondingCurve(payable(curveAddress)).buy{value: 5 ether}(actors[0], 1, block.timestamp);
-        // Keep launch 0 full-range; launch 1 must graduate past occupied ticks on both sides.
-        if (launch == 1) _saturateBoundaryTicks(factory, actors[0], token, launch);
+        // Launch 1 faces boundary-saturation attempts before graduation (the hook rejects them) and a
+        // real foreign position afterwards (liquidity opens once graduated).
+        if (launch == 1) _attemptBoundarySaturation(factory, actors[0], token, launch, true);
         factory.graduate(launch);
-        int24 shift = launch == 1 ? int24(120) : int24(0);
-        assertEq(factory.lockedTickLower(launch), TickMath.minUsableTick(60) + shift);
-        assertEq(factory.lockedTickUpper(launch), TickMath.maxUsableTick(60) - shift);
+        assertEq(factory.lockedTickLower(launch), TickMath.minUsableTick(60));
+        assertEq(factory.lockedTickUpper(launch), TickMath.maxUsableTick(60));
+        if (launch == 1) _attemptBoundarySaturation(factory, actors[0], token, launch, false);
         uint256 share = token.balanceOf(actors[0]) / 3;
         for (uint256 j = 1; j < 3; ++j) {
             vm.prank(actors[0]);
@@ -346,17 +350,35 @@ contract HookInvariantTest is Test {
         }
     }
 
-    function _saturateBoundaryTicks(PvPadFactory factory, address actor, IERC20 token, uint256 launch) private {
+    function _attemptBoundarySaturation(
+        PvPadFactory factory,
+        address actor,
+        IERC20 token,
+        uint256 launch,
+        bool expectClosed
+    ) private {
         PoolModifyLiquidityTest attacker = new PoolModifyLiquidityTest(factory.poolManager());
         PoolKey memory key = factory.getPoolKey(launch);
         int24 lower = TickMath.minUsableTick(60);
         int24 upper = TickMath.maxUsableTick(60);
+        // Pre-graduation attempts use the full per-tick cap (the grief); the post-graduation foreign
+        // position leaves room for the factory's full-range liquidity already sharing the boundary.
         int256 maximum = int256(uint256(Pool.tickSpacingToMaxLiquidityPerTick(60)));
+        if (!expectClosed) maximum /= 2;
+        bytes memory closed = abi.encodeWithSelector(
+            CustomRevert.WrappedError.selector,
+            address(factory.hook()),
+            IHooks.beforeAddLiquidity.selector,
+            abi.encodeWithSelector(PvPadHook.LiquidityClosed.selector),
+            abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+        );
         vm.startPrank(actor);
         token.approve(address(attacker), type(uint256).max);
+        if (expectClosed) vm.expectRevert(closed);
         attacker.modifyLiquidity{value: 0.001 ether}(
             key, IPoolManager.ModifyLiquidityParams(lower, lower + 60, maximum, bytes32(0)), ""
         );
+        if (expectClosed) vm.expectRevert(closed);
         attacker.modifyLiquidity{value: 0.001 ether}(
             key, IPoolManager.ModifyLiquidityParams(upper - 60, upper, maximum, bytes32(0)), ""
         );
@@ -406,9 +428,12 @@ contract HookInvariantTest is Test {
         handler.assertLockedLiquidityAndSupply();
     }
 
-    function test_shiftedGraduationRangeRemainsLockedAcrossAllSwapModes() public {
-        assertGt(handler.initialTickLower(1), TickMath.minUsableTick(60));
-        assertLt(handler.initialTickUpper(1), TickMath.maxUsableTick(60));
+    function test_fullRangeGraduationWithForeignPositionsRemainsLockedAcrossAllSwapModes() public {
+        assertEq(handler.initialTickLower(1), TickMath.minUsableTick(60));
+        assertEq(handler.initialTickUpper(1), TickMath.maxUsableTick(60));
+        PoolId id = handler.factory().getPoolKey(1).toId();
+        (uint128 foreignGross,) = StateLibrary.getTickLiquidity(handler.manager(), id, TickMath.maxUsableTick(60));
+        assertEq(foreignGross, Pool.tickSpacingToMaxLiquidityPerTick(60) / 2 + handler.initialLiquidity(1));
         for (uint8 mode; mode < 4; ++mode) {
             handler.swap(1, mode % 3, mode, mode == 0 || mode == 3 ? uint128(0.001 ether) : uint128(1_000 ether));
             handler.attackLockedPosition(1, mode % 3);

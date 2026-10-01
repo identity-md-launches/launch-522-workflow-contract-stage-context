@@ -5,7 +5,9 @@ import {Test} from "forge-std/Test.sol";
 import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PvPadFactory} from "../src/PvPadFactory.sol";
 import {PvPadHook} from "../src/hooks/PvPadHook.sol";
@@ -239,6 +241,8 @@ contract CurveFactoryTest is Test {
 }
 
 contract FactoryConstructionTest is Test {
+    using PoolIdLibrary for PoolKey;
+
     PoolManager manager;
     WorkerSubsidy workers;
     KingOfThePad king;
@@ -249,9 +253,7 @@ contract FactoryConstructionTest is Test {
         manager = new PoolManager(address(this));
         workers = new WorkerSubsidy(address(this));
         king = new KingOfThePad(workers);
-        uint160 flags = Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
-            | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG;
-        (, bytes32 salt) = HookMiner.find(address(this), flags, type(PvPadHook).creationCode, abi.encode(manager));
+        (, bytes32 salt) = HookMiner.findPvPadHook(address(this), address(manager));
         hook = new PvPadHook{salt: salt}(manager);
         factory = new PvPadFactory(manager, workers, king, hook, address(0xBEEF));
         vm.deal(address(this), 1 ether);
@@ -293,19 +295,24 @@ contract FactoryConstructionTest is Test {
         assertEq(workers.workerPot(), 0);
     }
 
-    function test_poisonedPredictedPoolRejectedAndFreshSaltSucceeds() public {
+    function test_poisonedPredictedPoolIsSkippedAutomaticallyAndNeverSeeded() public {
         address predicted = _predictedToken("Poisoned", "PSN", bytes32(0));
         PoolKey memory key = _key(predicted);
         manager.initialize(key, uint160(1 << 96));
-        vm.expectRevert(PvPadFactory.UnexpectedPoolPrice.selector);
-        factory.createLaunch{value: 0.0005 ether}("Poisoned", "PSN");
-        assertEq(factory.launchCount(), 1);
-        assertEq(predicted.code.length, 0);
-        assertEq(workers.workerPot(), 0);
-        uint256 id = factory.createLaunch{value: 0.0005 ether}("Poisoned", "PSN", bytes32(uint256(1)));
-        (, address token,,,) = factory.launches(id);
+        uint256 id = factory.createLaunch{value: 0.0005 ether}("Poisoned", "PSN");
+        assertEq(id, 1);
+        (, address token,,, PoolId poolId) = factory.launches(id);
         assertTrue(token != predicted);
+        assertEq(predicted.code.length, 0);
+        (uint160 price,,,) = StateLibrary.getSlot0(manager, poolId);
+        assertEq(price, factory.canonicalSqrtPriceX96());
+        (uint160 poisoned,,,) = StateLibrary.getSlot0(manager, key.toId());
+        assertEq(poisoned, uint160(1 << 96));
         assertEq(workers.workerPot(), 0.0005 ether);
+        // An explicit user salt remains available as a manual escape hatch.
+        uint256 next = factory.createLaunch{value: 0.0005 ether}("Poisoned", "PSN", bytes32(uint256(1)));
+        assertEq(next, 2);
+        assertEq(workers.workerPot(), 0.001 ether);
     }
 
     function test_preinitializedCanonicalPriceCanLaunchSafely() public {

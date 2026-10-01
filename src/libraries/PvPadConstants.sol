@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+
 /// @title PvPadConstants
 /// @notice Frozen economic and curve defaults (see SPEC.md).
 library PvPadConstants {
@@ -22,6 +24,11 @@ library PvPadConstants {
 
     uint24 internal constant POOL_FEE = 0; // pad fee via hook only
     int24 internal constant POOL_TICK_SPACING = 60;
+
+    /// @dev Shared hook address flags, 0x08cc: beforeAddLiquidity (pre-graduation liquidity gate),
+    /// beforeSwap, afterSwap and both swap return deltas. beforeInitialize is deliberately absent.
+    uint160 internal constant HOOK_FLAGS = Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+        | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG;
 
     uint256 internal constant MAX_EPOCH_WINDOW = 90 days;
 }

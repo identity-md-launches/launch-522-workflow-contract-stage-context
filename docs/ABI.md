@@ -7,6 +7,7 @@ Machine-readable ABI arrays in `docs/abi/<Contract>.json` are exported from Soli
 | `PvPadFactory.createLaunch(string,string)` | Exact launch fee; returns launch ID; default empty metadata and zero user salt |
 | `createLaunch(string,string,bytes32)` | Fresh user salt to change token/pool address |
 | `createLaunch(string,string,bytes32,string)` | Also records immutable metadata URI (up to 2048 bytes); JSON can hold image and socials |
+| `predictLaunchToken(address,string,string,bytes32)`, `MAX_SALT_ATTEMPTS`, `LaunchSaltRetried` | Token address and salt attempt (0..15) the next create would use; a nonzero attempt means a predicted pool was poisoned and skipped; reverts `UnexpectedPoolPrice` when all 16 are poisoned |
 | `launches(id)`, `launchMetadataURI(id)`, `getPoolKey(id)` | Read creator, token, curve, graduated flag, PoolId, metadata and canonical pool key |
 | `LaunchCreated`, `LaunchMetadata`, `Graduated`, `LiquidityLocked` | Index by factory and launch ID, not token name/symbol |
 | `BondingCurve.quoteBuy`, `quoteSell`, `maxBuyInput` | Quote current state; buy quote caps executable input at the remaining threshold capacity |
@@ -14,8 +15,9 @@ Machine-readable ABI arrays in `docs/abi/<Contract>.json` are exported from Soli
 | `sell(uint256,address,uint256,uint256)` | Token amount, ETH recipient, minimum ETH output, deadline; approve curve for exact token input first |
 | `readyToGraduate`, `getReserves` | Progress from accounted net ETH; donations and pending fees do not count |
 | `PvPadFactory.graduate(id)` | Permissionless, once threshold reached; no ETH supplied; permanently locks liquidity |
-| `lockedLiquidity(id)`, `lockedTickLower(id)`, `lockedTickUpper(id)`, `LiquidityRangeLocked` | Actual factory-owned v4 position; salt `bytes32(id)`; saturated boundaries may move inward from full range |
-| `PvPadHook.getHookPermissions`, `bindings` | Check flag layout and per-pool factory/escrow/creator binding |
+| `lockedLiquidity(id)`, `lockedTickLower(id)`, `lockedTickUpper(id)`, `LiquidityRangeLocked` | Actual factory-owned v4 position; salt `bytes32(id)`; full range in practice because the hook closes pre-graduation liquidity |
+| `PvPadHook.getHookPermissions`, `REQUIRED_FLAGS`, `bindings` | Flag layout (0x08cc) and per-pool factory/escrow/creator binding |
+| `PvPadHook.beforeAddLiquidity` | PoolManager-only; reverts `LiquidityClosed` (wrapped by v4 as `WrappedError`) for any non-factory deposit before graduation and for unbound pools; LP routers should surface this before graduation |
 | `KingOfThePad.claimKing(address)` | Beneficiary; payable value strictly exceeds current claimPrice; old king is not refunded |
 | `FeeEscrow.pending(address(0),account)`, `withdraw(address(0),to)` | Read native credit; only credited caller may withdraw, to a chosen nonzero address; returns 0 if recipient rejects |
 | `FeeEscrow.assignUnassigned()` | Anyone assigns pre-crown fees to permanently recorded first beneficiary |
@@ -29,7 +31,7 @@ Machine-readable ABI arrays in `docs/abi/<Contract>.json` are exported from Soli
 
 The unprotected `buy(address)` and `sell(uint256,address)` convenience overloads retain upstream compatibility. Production UI calls should use minimum-output/deadline overloads. Deadlines are inclusive.
 
-At exactly 4.2 ETH of accounted reserves, both curve trade directions revert `NotReady` until graduation (then `Graduated`). Both buy and sell quotes are zero. Submit permissionless `graduate(id)`; a failed graduation leaves the threshold state intact for retry. Index the selected LP ticks rather than assuming the extremes. `LiquidityRangeUnavailable` fails graduation atomically if no acceptable range containing the canonical price remains.
+At exactly 4.2 ETH of accounted reserves, both curve trade directions revert `NotReady` until graduation (then `Graduated`). Both buy and sell quotes are zero. Submit permissionless `graduate(id)`; a failed graduation leaves the threshold state intact for retry. Index the selected LP ticks rather than assuming the extremes. `LiquidityRangeUnavailable` fails graduation atomically if no acceptable range containing the canonical price remains. Third-party liquidity can be added to a canonical pool only after `graduate(id)` succeeds (`registeredPool(id)` is true).
 
 Escrow `authorizeRecorder` is callable only by the immutable factory; the factory exposes no public forwarding setter. Recording methods, including `recordTradeFeeNativeFor` and `recordTradeFeeNativeShares`, are internal integration surfaces for authorized curves/hook, not user deposits. Explicit-share recording preserves the sum of individual rounded halves during deferred retries.
 

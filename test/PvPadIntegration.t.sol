@@ -48,9 +48,7 @@ contract PvPadIntegrationTest is Test {
         router = new PoolSwapTest(manager);
         workers = new WorkerSubsidy(address(this));
         king = new KingOfThePad(workers);
-        uint160 flags = Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
-            | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG;
-        (, bytes32 salt) = HookMiner.find(address(this), flags, type(PvPadHook).creationCode, abi.encode(manager));
+        (, bytes32 salt) = HookMiner.findPvPadHook(address(this), address(manager));
         hook = new PvPadHook{salt: salt}(manager);
         factory = new PvPadFactory(manager, workers, king, hook, creator);
         escrow = factory.feeEscrow();
@@ -336,8 +334,10 @@ contract PvPadIntegrationTest is Test {
         assertEq(padToken.balanceOf(creator), 0);
         assertEq(workers.updater(), address(this));
         assertEq(escrow.factory(), address(factory));
-        assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, 0x00cc);
+        assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, 0x08cc);
+        assertEq(hook.REQUIRED_FLAGS(), 0x08cc);
         assertFalse(hook.getHookPermissions().beforeInitialize);
+        assertTrue(hook.getHookPermissions().beforeAddLiquidity);
     }
 
     receive() external payable {}

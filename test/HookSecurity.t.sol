@@ -36,6 +36,10 @@ contract FeeHookManager {
         (, fee) = hook.afterSwap(msg.sender, key, params, toBalanceDelta(ethDelta, 0), "");
     }
 
+    function addLiquidity(PvPadHook hook, address sender, PoolKey memory key) external view returns (bytes4) {
+        return hook.beforeAddLiquidity(sender, key, IPoolManager.ModifyLiquidityParams(-60, 60, 1, bytes32(0)), "");
+    }
+
     receive() external payable {}
 }
 
@@ -100,9 +104,7 @@ contract HookSecurityTest is Test {
         manager = new FeeHookManager();
         king = new FeeHookKing();
         escrow = new FaultInjectingEscrow(address(this), king);
-        (address predicted, bytes32 salt) = HookMiner.find(
-            address(this), 0x00cc, type(PvPadHook).creationCode, abi.encode(IPoolManager(address(manager)))
-        );
+        (address predicted, bytes32 salt) = HookMiner.findPvPadHook(address(this), address(manager));
         hook = new PvPadHook{salt: salt}(IPoolManager(address(manager)));
         assertEq(address(hook), predicted);
         escrow.setRecorder(address(hook));
@@ -116,21 +118,63 @@ contract HookSecurityTest is Test {
         return graduated && PoolId.unwrap(id) == PoolId.unwrap(key.toId());
     }
 
-    function test_hookUsesOnlySwapFlagsAndNoInitializationCallback() public {
+    function test_hookUsesSwapAndAddLiquidityFlagsAndNoInitializationCallback() public {
         Hooks.Permissions memory p = hook.getHookPermissions();
-        assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, 0x00cc);
+        assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, 0x08cc);
+        assertEq(hook.REQUIRED_FLAGS(), 0x08cc);
+        assertEq(HookMiner.PVPAD_HOOK_FLAGS, 0x08cc);
         assertTrue(p.beforeSwap && p.afterSwap && p.beforeSwapReturnDelta && p.afterSwapReturnDelta);
-        assertFalse(p.beforeInitialize || p.afterInitialize || p.beforeAddLiquidity || p.beforeRemoveLiquidity);
+        assertTrue(p.beforeAddLiquidity);
+        assertFalse(p.beforeInitialize || p.afterInitialize || p.afterAddLiquidity || p.beforeRemoveLiquidity);
+        assertFalse(p.afterRemoveLiquidity || p.beforeDonate || p.afterDonate);
+        assertFalse(p.afterAddLiquidityReturnDelta || p.afterRemoveLiquidityReturnDelta);
         vm.expectRevert(PvPadHook.UnsupportedCallback.selector);
         hook.beforeInitialize(address(this), key, 1 << 96);
+        vm.expectRevert(PvPadHook.UnsupportedCallback.selector);
+        hook.beforeRemoveLiquidity(address(this), key, IPoolManager.ModifyLiquidityParams(-60, 60, -1, 0), "");
     }
 
     function test_constructorRejectsWrongPermissionAddress() public {
         bytes memory code = abi.encodePacked(type(PvPadHook).creationCode, abi.encode(IPoolManager(address(manager))));
         uint256 salt;
-        while (uint160(HookMiner.computeAddress(address(this), salt, code)) & Hooks.ALL_HOOK_MASK == 0x00cc) salt++;
+        while (uint160(HookMiner.computeAddress(address(this), salt, code)) & Hooks.ALL_HOOK_MASK == 0x08cc) salt++;
         vm.expectRevert();
         new PvPadHook{salt: bytes32(salt)}(IPoolManager(address(manager)));
+    }
+
+    function test_legacySwapOnlyFlagAddressIsRejected() public {
+        // The previous 0x00cc layout (no beforeAddLiquidity) can no longer host this hook.
+        (address legacy, bytes32 salt) = HookMiner.find(
+            address(this), 0x00cc, type(PvPadHook).creationCode, abi.encode(IPoolManager(address(manager)))
+        );
+        vm.expectRevert(abi.encodeWithSelector(Hooks.HookAddressNotValid.selector, legacy));
+        new PvPadHook{salt: salt}(IPoolManager(address(manager)));
+    }
+
+    function test_beforeAddLiquidityAdmitsOnlyBoundFactoryUntilGraduation() public {
+        graduated = false;
+        vm.expectRevert(PvPadHook.LiquidityClosed.selector);
+        manager.addLiquidity(hook, address(0xBAD), key);
+        vm.expectRevert(PvPadHook.LiquidityClosed.selector);
+        manager.addLiquidity(hook, address(manager), key);
+        // The bound factory (this test contract bound the pool) deposits its graduation position.
+        assertEq(manager.addLiquidity(hook, address(this), key), IHooks.beforeAddLiquidity.selector);
+        graduated = true;
+        assertEq(manager.addLiquidity(hook, address(0xBAD), key), IHooks.beforeAddLiquidity.selector);
+        assertEq(manager.addLiquidity(hook, address(this), key), IHooks.beforeAddLiquidity.selector);
+    }
+
+    function test_beforeAddLiquidityRejectsUnboundPoolsAndDirectCalls() public {
+        PoolKey memory unbound = key;
+        unbound.fee = 500;
+        vm.expectRevert(PvPadHook.LiquidityClosed.selector);
+        manager.addLiquidity(hook, address(this), unbound);
+        unbound = key;
+        unbound.currency1 = Currency.wrap(address(new HookTokenProvenance()));
+        vm.expectRevert(PvPadHook.LiquidityClosed.selector);
+        manager.addLiquidity(hook, address(this), unbound);
+        vm.expectRevert(PvPadHook.NotPoolManager.selector);
+        hook.beforeAddLiquidity(address(this), key, IPoolManager.ModifyLiquidityParams(-60, 60, 1, 0), "");
     }
 
     function test_foreignRegistryCannotCaptureTokenPool() public {

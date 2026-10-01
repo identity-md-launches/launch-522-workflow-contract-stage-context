@@ -27,7 +27,10 @@ interface IPvPadTokenFactory {
 }
 
 /// @notice Shared native-ETH fee hook. Each token's deploying factory binds its canonical pool.
-/// @dev Deployment must use a CREATE2 salt yielding the permission bits returned below (0x00cc).
+/// @dev Deployment must use a CREATE2 salt yielding the permission bits in REQUIRED_FLAGS (0x08cc):
+/// beforeAddLiquidity, beforeSwap, afterSwap and both swap return-delta flags. No beforeInitialize.
+/// Before graduation only the bound factory may add liquidity, so nobody can saturate a tick's
+/// liquidity cap or otherwise shape the pool ahead of the locked graduation deposit.
 contract PvPadHook is IHooks, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
 
@@ -37,9 +40,13 @@ contract PvPadHook is IHooks, ReentrancyGuard {
     error NotLaunchFactory();
     error PoolAlreadyBound();
     error PoolNotGraduated();
+    error LiquidityClosed();
     error PartialFill();
     error AmountTooLarge();
     error UnsupportedCallback();
+
+    /// @notice Address bits (masked by Hooks.ALL_HOOK_MASK) a deployed instance must carry.
+    uint160 public constant REQUIRED_FLAGS = PvPadConstants.HOOK_FLAGS;
 
     struct PoolBinding {
         IPvPadLaunchRegistry registry;
@@ -67,13 +74,16 @@ contract PvPadHook is IHooks, ReentrancyGuard {
         if (address(_poolManager) == address(0)) revert ZeroAddress();
         poolManager = _poolManager;
         Hooks.validateHookPermissions(this, getHookPermissions());
+        if (uint160(address(this)) & Hooks.ALL_HOOK_MASK != REQUIRED_FLAGS) {
+            revert Hooks.HookAddressNotValid(address(this));
+        }
     }
 
     function getHookPermissions() public pure returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
-            beforeAddLiquidity: false,
+            beforeAddLiquidity: true,
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
@@ -110,6 +120,23 @@ contract PvPadHook is IHooks, ReentrancyGuard {
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
         _;
+    }
+
+    /// @notice Liquidity is closed until graduation: only the bound factory deposits (its locked
+    /// graduation position), then anyone may add. Unbound pools that name this hook stay closed.
+    /// @dev `sender` is the PoolManager's caller. The factory registers the pool only after its
+    /// deposit settles, so the factory check is what admits the graduation deposit itself.
+    function beforeAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.ModifyLiquidityParams calldata,
+        bytes calldata
+    ) external view onlyPoolManager returns (bytes4) {
+        PoolId id = key.toId();
+        PoolBinding storage binding = bindings[id];
+        if (address(binding.registry) == address(0)) revert LiquidityClosed();
+        if (sender != address(binding.registry) && !binding.registry.isRegisteredPool(id)) revert LiquidityClosed();
+        return IHooks.beforeAddLiquidity.selector;
     }
 
     function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata params, bytes calldata)
@@ -227,14 +254,6 @@ contract PvPadHook is IHooks, ReentrancyGuard {
     }
 
     function afterInitialize(address, PoolKey calldata, uint160, int24) external pure returns (bytes4) {
-        revert UnsupportedCallback();
-    }
-
-    function beforeAddLiquidity(address, PoolKey calldata, IPoolManager.ModifyLiquidityParams calldata, bytes calldata)
-        external
-        pure
-        returns (bytes4)
-    {
         revert UnsupportedCallback();
     }
 

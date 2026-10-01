@@ -52,6 +52,11 @@ contract PvPadFactory is ReentrancyGuard {
     event LaunchMetadata(uint256 indexed launchId, string metadataURI);
     event LiquidityLocked(uint256 indexed launchId, uint128 liquidity, uint256 ethDust, uint256 tokenDust);
     event LiquidityRangeLocked(uint256 indexed launchId, int24 tickLower, int24 tickUpper);
+    /// @notice Emitted when a predicted pool was preinitialized at a foreign price and a later salt was used.
+    event LaunchSaltRetried(uint256 indexed launchId, uint256 attempt, address token);
+
+    /// @notice Bound on automatic salt retries when predicted pools are poisoned at a foreign price.
+    uint256 public constant MAX_SALT_ATTEMPTS = 16;
 
     struct Launch {
         address creator;
@@ -170,27 +175,74 @@ contract PvPadFactory is ReentrancyGuard {
             revert InvalidMetadata();
         }
         launchId = launchCount++;
-        bytes32 salt = keccak256(abi.encode(launchId, creator, name, symbol, userSalt));
-        PvPadToken token = new PvPadToken{salt: salt}(name, symbol);
-        BondingCurve curve = new BondingCurve(
-            IERC20(address(token)), IPvPadFactoryCurve(address(this)), launchId, creator, feeEscrow, kingOfThePad
+        address token = _deployToken(launchId, creator, name, symbol, userSalt);
+        address curve = address(
+            new BondingCurve(
+                IERC20(token), IPvPadFactoryCurve(address(this)), launchId, creator, feeEscrow, kingOfThePad
+            )
         );
-        PoolKey memory key = _poolKey(address(token));
+        PoolKey memory key = _poolKey(token);
         PoolId poolId = key.toId();
-        launches[launchId] = Launch(creator, address(token), address(curve), false, poolId);
-        isBondingCurve[address(curve)] = true;
+        launches[launchId] = Launch(creator, token, curve, false, poolId);
+        isBondingCurve[curve] = true;
         poolCreator[poolId] = creator;
-        feeEscrow.authorizeRecorder(address(curve), true);
+        feeEscrow.authorizeRecorder(curve, true);
         hook.bindPool(key, creator, feeEscrow);
+        _initializeCanonicalPool(key, poolId);
+        IERC20(token).safeTransfer(curve, PvPadConstants.TOKEN_SUPPLY);
+        emit LaunchCreated(launchId, creator, token, curve, name, symbol);
+    }
+
+    function _deployToken(uint256 launchId, address creator, string memory name, string memory symbol, bytes32 userSalt)
+        private
+        returns (address token)
+    {
+        (bytes32 salt, address predicted, uint256 attempt) = _selectSalt(launchId, creator, name, symbol, userSalt);
+        token = address(new PvPadToken{salt: salt}(name, symbol));
+        if (token != predicted) revert InvalidConfiguration();
+        if (attempt != 0) emit LaunchSaltRetried(launchId, attempt, token);
+    }
+
+    /// @dev Never seed at a foreign price. The salt scan already avoided one; this is the hard stop.
+    function _initializeCanonicalPool(PoolKey memory key, PoolId poolId) private {
         (uint160 existingPrice,,,) = StateLibrary.getSlot0(poolManager, poolId);
         if (existingPrice == 0) {
             poolManager.initialize(key, canonicalSqrtPriceX96);
         } else if (existingPrice != canonicalSqrtPriceX96) {
-            // Reject poisoned price before any trader can fund this curve.
             revert UnexpectedPoolPrice();
         }
-        IERC20(address(token)).safeTransfer(address(curve), PvPadConstants.TOKEN_SUPPLY);
-        emit LaunchCreated(launchId, creator, address(token), address(curve), name, symbol);
+    }
+
+    /// @notice Token address and salt attempt the next `createLaunch` with these inputs would use.
+    /// @dev Reverts UnexpectedPoolPrice when every bounded candidate pool is poisoned at a foreign price.
+    function predictLaunchToken(address creator, string calldata name, string calldata symbol, bytes32 userSalt)
+        external
+        view
+        returns (address token, uint256 attempt)
+    {
+        (, token, attempt) = _selectSalt(launchCount, creator, name, symbol, userSalt);
+    }
+
+    /// @dev Attempt 0 keeps the original salt derivation. Someone who predicts a token address can
+    /// preinitialize its pool (the shared hook has no beforeInitialize) at a foreign price; rather than
+    /// failing the whole create, skip to the next salt. A canonical-price preinitialization is accepted.
+    function _selectSalt(uint256 launchId, address creator, string memory name, string memory symbol, bytes32 userSalt)
+        private
+        view
+        returns (bytes32 salt, address token, uint256 attempt)
+    {
+        bytes32 initCodeHash = keccak256(abi.encodePacked(type(PvPadToken).creationCode, abi.encode(name, symbol)));
+        for (attempt = 0; attempt < MAX_SALT_ATTEMPTS; ++attempt) {
+            salt = attempt == 0
+                ? keccak256(abi.encode(launchId, creator, name, symbol, userSalt))
+                : keccak256(abi.encode(launchId, creator, name, symbol, userSalt, attempt));
+            token =
+                address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash)))));
+            if (token.code.length != 0) continue;
+            (uint160 existingPrice,,,) = StateLibrary.getSlot0(poolManager, _poolKey(token).toId());
+            if (existingPrice == 0 || existingPrice == canonicalSqrtPriceX96) return (salt, token, attempt);
+        }
+        revert UnexpectedPoolPrice();
     }
 
     function getPoolKey(uint256 launchId) external view returns (PoolKey memory) {

@@ -5,7 +5,6 @@ import {Test} from "forge-std/Test.sol";
 import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
-import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -33,9 +32,7 @@ contract FactoryAdversarialTest is Test {
         manager = new PoolManager(address(this));
         workers = new WorkerSubsidy(address(this));
         king = new KingOfThePad(workers);
-        uint160 flags = Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
-            | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG;
-        (, bytes32 salt) = HookMiner.find(address(this), flags, type(PvPadHook).creationCode, abi.encode(manager));
+        (, bytes32 salt) = HookMiner.findPvPadHook(address(this), address(manager));
         hook = new PvPadHook{salt: salt}(manager);
         factory = new PvPadFactory(manager, workers, king, hook, creator);
         vm.deal(creator, 100 ether);
